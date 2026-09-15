@@ -16,10 +16,14 @@ const APP_DATA = process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE |
 const RUNTIME_ROOT = path.join(APP_DATA, "Antigravity-ZhCN");
 const LOG_FILE = path.join(RUNTIME_ROOT, "antigravity-zhcn.log");
 const PID_FILE = path.join(RUNTIME_ROOT, "antigravity-zhcn.pid");
-const ACTIVE_PORT_FILES = [
-  path.join(process.env.APPDATA || path.join(process.env.USERPROFILE || ROOT, "AppData", "Roaming"), "Antigravity", "DevToolsActivePort"),
+const ROAMING_APP_DATA = process.env.APPDATA || path.join(process.env.USERPROFILE || ROOT, "AppData", "Roaming");
+const ACTIVE_PORT_FILES = [...new Set([
+  path.join(ROAMING_APP_DATA, "Antigravity", "DevToolsActivePort"),
+  path.join(ROAMING_APP_DATA, "Antigravity", "User Data", "DevToolsActivePort"),
   path.join(APP_DATA, "Antigravity", "DevToolsActivePort"),
-];
+  path.join(APP_DATA, "Antigravity", "User Data", "DevToolsActivePort"),
+  path.join(ROOT, "DevToolsActivePort"),
+])];
 
 let shuttingDown = false;
 
@@ -102,8 +106,24 @@ function runPowerShell(script) {
   });
 }
 
+function hasProcessName() {
+  return new Promise((resolve) => {
+    execFile(
+      "tasklist.exe",
+      ["/FI", `IMAGENAME eq ${APP_NAME}`, "/FO", "CSV", "/NH"],
+      { windowsHide: true, maxBuffer: 256 * 1024 },
+      (error, stdout) => {
+        if (error) return resolve(false);
+        resolve(stdout.toLowerCase().includes(`"${APP_NAME.toLowerCase()}"`));
+      },
+    );
+  });
+}
+
 // Use the executable path, not only the process name, so another installation is ignored.
 async function findRunningApp() {
+  if (!await hasProcessName()) return null;
+
   const script = [
     `$targetPath = ${powerShellLiteral(APP)};`,
     `$targetName = ${powerShellLiteral(APP_NAME)};`,

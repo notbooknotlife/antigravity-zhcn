@@ -95,11 +95,21 @@ class CdpClient {
     const url = new URL(this.webSocketUrl);
     const key = Buffer.from(`${Date.now()}-${Math.random()}`).toString('base64');
     this.socket = net.createConnection({ host: url.hostname, port: Number(url.port) });
+    this.socket.setTimeout(3000);
     await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        this.socket.setTimeout(0);
+        this.socket.off('timeout', onTimeout);
+        callback(value);
+      };
       const onError = (error) => {
         this.socket.off('connect', onConnect);
-        reject(error);
+        finish(reject, error);
       };
+      const onTimeout = () => finish(reject, new Error('CDP WebSocket connection timed out'));
       const onConnect = () => {
         this.socket.off('error', onError);
         const path = `${url.pathname}${url.search}`;
@@ -117,7 +127,7 @@ class CdpClient {
           if (!handshake.includes('\r\n\r\n')) return;
           this.socket.off('data', onData);
           if (!handshake.startsWith('HTTP/1.1 101')) {
-            reject(new Error(`CDP WebSocket handshake failed: ${handshake.split('\r\n')[0]}`));
+            finish(reject, new Error(`CDP WebSocket handshake failed: ${handshake.split('\r\n')[0]}`));
             return;
           }
           const separator = Buffer.from('\r\n\r\n', 'binary');
@@ -127,11 +137,12 @@ class CdpClient {
           this.socket.on('data', (data) => this.handleData(data));
           this.socket.on('close', () => this.rejectPending(new Error('CDP connection closed')));
           this.socket.on('error', (error) => this.rejectPending(error));
-          resolve();
+          finish(resolve);
         };
         this.socket.on('data', onData);
       };
       this.socket.once('error', onError);
+      this.socket.once('timeout', onTimeout);
       this.socket.once('connect', onConnect);
     });
     return this;
@@ -209,4 +220,3 @@ async function findAllPageTargets(port) {
 }
 
 module.exports = { CdpClient, findPageTarget, findAllPageTargets, requestJson };
-
