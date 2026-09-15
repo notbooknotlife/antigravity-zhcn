@@ -4,6 +4,8 @@
 
 ## 工作方式
 
+> **安装前务必安装 Node.js。** Node.js 为插件监听器提供运行环境；如果未安装或无法运行，`install.ps1` 会弹窗提示并终止安装。
+
 安装后，插件通过当前用户的启动项监听原始 `Antigravity.exe`：
 
 - 不替换或修改官方 `Antigravity.exe`。
