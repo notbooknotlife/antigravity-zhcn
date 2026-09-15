@@ -2,53 +2,49 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execFile, spawn } = require("child_process");
+const { execFile } = require("child_process");
 const { CdpClient, findAllPageTargets } = require("./cdp-client");
 const { buildTranslationScript } = require("./translate");
 
-const STATE_FILE = path.join(__dirname, "install-state.json");
-const configuredAppPath = (() => {
-  try {
-    const state = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-    return typeof state.appPath === "string" ? state.appPath : null;
-  } catch (_) {
-    return null;
-  }
-})();
-const APP = process.env.ANTIGRAVITY_EXE || configuredAppPath || path.join(
-  process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || "", "AppData", "Local"),
-  "Programs",
-  "antigravity",
-  "Antigravity.exe",
-);
-const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_ZHCN_PORT || 9229);
-const STARTUP_TIMEOUT_MS = Number(process.env.ANTIGRAVITY_ZHCN_STARTUP_TIMEOUT || 30000);
+// The package is installed beside Antigravity.exe.
 const ROOT = __dirname;
-const LOG = path.join(ROOT, "antigravity-zhcn.log");
-const PID_FILE = path.join(ROOT, "antigravity-zhcn.pid");
-const ACTIVE_PORT_FILE = path.join(
-  process.env.APPDATA || path.join(process.env.USERPROFILE || "", "AppData", "Roaming"),
-  "Antigravity",
-  "DevToolsActivePort"
-);
+const APP = path.resolve(process.env.ANTIGRAVITY_EXE || path.join(ROOT, "Antigravity.exe"));
+const APP_NAME = path.basename(APP);
+const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_ZHCN_PORT || 9229);
+const POLL_INTERVAL_MS = Number(process.env.ANTIGRAVITY_ZHCN_POLL_INTERVAL || 1500);
+const APP_DATA = process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || ROOT, "AppData", "Local");
+const RUNTIME_ROOT = path.join(APP_DATA, "Antigravity-ZhCN");
+const LOG_FILE = path.join(RUNTIME_ROOT, "antigravity-zhcn.log");
+const PID_FILE = path.join(RUNTIME_ROOT, "antigravity-zhcn.pid");
+const ACTIVE_PORT_FILES = [
+  path.join(process.env.APPDATA || path.join(process.env.USERPROFILE || ROOT, "AppData", "Roaming"), "Antigravity", "DevToolsActivePort"),
+  path.join(APP_DATA, "Antigravity", "DevToolsActivePort"),
+];
+
+let shuttingDown = false;
+
+function ensureRuntimeRoot() {
+  fs.mkdirSync(RUNTIME_ROOT, { recursive: true });
+}
 
 function log(message) {
   const line = `[${new Date().toISOString()}] ${message}`;
   process.stdout.write(`${line}\n`);
   try {
-    // 限制日志大小不超过 1MB
-    if (fs.existsSync(LOG) && fs.statSync(LOG).size > 1024 * 1024) {
-      fs.renameSync(LOG, LOG + ".old");
+    ensureRuntimeRoot();
+    if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 1024 * 1024) {
+      fs.renameSync(LOG_FILE, `${LOG_FILE}.old`);
     }
-    fs.appendFileSync(LOG, `${line}\n`);
-  } catch (_) {}
+    fs.appendFileSync(LOG_FILE, `${line}\n`, "utf8");
+  } catch (_) {
+    // Logging must never stop the monitor.
+  }
 }
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// 检查 PID 是否仍在运行
 function isPidRunning(pid) {
   try {
     process.kill(pid, 0);
@@ -58,188 +54,239 @@ function isPidRunning(pid) {
   }
 }
 
-function isAntigravityRunning() {
-  const imageName = path.basename(APP);
-  return new Promise((resolve) => {
-    execFile("tasklist.exe", ["/FI", `IMAGENAME eq ${imageName}`, "/FO", "CSV", "/NH"], {
-      windowsHide: true,
-    }, (error, stdout) => {
-      if (error) return resolve(false);
-      resolve(stdout.toLowerCase().includes(`"${imageName.toLowerCase()}"`));
-    });
-  });
-}
-
-// 确保单实例运行
 function ensureSingleInstance() {
+  ensureRuntimeRoot();
+
   if (fs.existsSync(PID_FILE)) {
     try {
       const oldPid = Number(fs.readFileSync(PID_FILE, "utf8").trim());
       if (Number.isInteger(oldPid) && oldPid !== process.pid && isPidRunning(oldPid)) {
-        log(`Another instance of launcher.js is already running with PID ${oldPid}. Exiting current.`);
-        process.exit(0);
+        log(`Another listener is already running with PID ${oldPid}.`);
+        return false;
       }
     } catch (_) {}
   }
+
   fs.writeFileSync(PID_FILE, String(process.pid), "utf8");
-  process.on("exit", () => {
+  const removeOwnPid = () => {
     try {
       if (fs.existsSync(PID_FILE) && fs.readFileSync(PID_FILE, "utf8").trim() === String(process.pid)) {
         fs.unlinkSync(PID_FILE);
       }
     } catch (_) {}
+  };
+  process.once("exit", removeOwnPid);
+  return true;
+}
+
+function closeClients(activeClients) {
+  for (const session of activeClients.values()) {
+    try { session.client.close(); } catch (_) {}
+  }
+  activeClients.clear();
+}
+
+function powerShellLiteral(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function runPowerShell(script) {
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return new Promise((resolve) => {
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+      { windowsHide: true, maxBuffer: 1024 * 1024 },
+      (error, stdout) => resolve(error ? "" : stdout.trim()),
+    );
   });
 }
 
-// 读取当前运行中的 CDP 端口
+// Use the executable path, not only the process name, so another installation is ignored.
+async function findRunningApp() {
+  const script = [
+    `$targetPath = ${powerShellLiteral(APP)};`,
+    `$targetName = ${powerShellLiteral(APP_NAME)};`,
+    "$process = Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |",
+    "  Where-Object { $_.Name -ieq $targetName -and $_.ExecutablePath -and $_.ExecutablePath -ieq $targetPath } |",
+    "  Select-Object -First 1 ProcessId,ExecutablePath;",
+    "if ($process) { $process | ConvertTo-Json -Compress }",
+  ].join(" ");
+
+  const output = await runPowerShell(script);
+  if (!output) return null;
+
+  try {
+    const result = JSON.parse(output);
+    const pid = Number(result.ProcessId);
+    return Number.isInteger(pid) && pid > 0 ? { pid, path: result.ExecutablePath } : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function findPortTargets(port) {
+  try {
+    const targets = await findAllPageTargets(port);
+    return targets.length > 0 ? targets : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 async function resolveCurrentPort() {
-  try {
-    if (fs.existsSync(ACTIVE_PORT_FILE)) {
-      const port = Number(fs.readFileSync(ACTIVE_PORT_FILE, "utf8").split(/\r?\n/)[0].trim());
-      if (Number.isInteger(port) && port > 0) {
-        const targets = await findAllPageTargets(port);
-        if (targets.length > 0) return port;
-      }
-    }
-  } catch (_) {}
+  const candidates = [];
+  if (Number.isInteger(DEFAULT_PORT) && DEFAULT_PORT > 0) candidates.push(DEFAULT_PORT);
 
-  // 尝试默认端口
-  try {
-    const targets = await findAllPageTargets(DEFAULT_PORT);
-    if (targets.length > 0) return DEFAULT_PORT;
-  } catch (_) {}
+  for (const file of ACTIVE_PORT_FILES) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const port = Number(fs.readFileSync(file, "utf8").split(/\r?\n/)[0].trim());
+      if (Number.isInteger(port) && port > 0) candidates.unshift(port);
+    } catch (_) {}
+  }
 
+  const checked = new Set();
+  for (const port of candidates) {
+    if (checked.has(port)) continue;
+    checked.add(port);
+    const targets = await findPortTargets(port);
+    if (targets) return { port, targets };
+  }
   return null;
 }
 
-// 向页面目标注入汉化脚本
 async function injectIntoTarget(target) {
   const client = await new CdpClient(target.webSocketDebuggerUrl).connect();
+  const source = buildTranslationScript();
   await client.command("Page.enable");
-  await client.command("Page.addScriptToEvaluateOnNewDocument", {
-    source: buildTranslationScript(),
-  });
+  await client.command("Page.addScriptToEvaluateOnNewDocument", { source });
   await client.command("Runtime.evaluate", {
-    expression: buildTranslationScript(),
+    expression: source,
     awaitPromise: false,
     returnByValue: false,
   });
   return client;
 }
 
-async function main() {
-  ensureSingleInstance();
-  log("Antigravity Simplified Chinese Guardian Daemon starting...");
+async function syncTargets(targets, activeClients) {
+  const currentTargetIds = new Set(targets.map((target) => target.id));
 
-  // 只在 Antigravity 尚未运行时由桌面入口一起拉起，避免重复启动官方程序。
-  let activePort = await resolveCurrentPort();
-  if (!activePort) {
-    if (!await isAntigravityRunning() && fs.existsSync(APP)) {
-      log(`Antigravity not detected, launching: ${APP}`);
-      spawn(APP, [`--remote-debugging-port=${DEFAULT_PORT}`], {
-        cwd: path.dirname(APP),
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      }).unref();
-    } else if (!fs.existsSync(APP)) {
-      log(`Antigravity executable not found: ${APP}`);
-      return;
+  for (const [id, session] of activeClients.entries()) {
+    if (!currentTargetIds.has(id)) {
+      try { session.client.close(); } catch (_) {}
+      activeClients.delete(id);
     }
   }
 
-  const activeClients = new Map(); // targetId -> { client, url }
-  let lastReportedPort = null;
-  let isWaitingLogged = false;
-  const startedAt = Date.now();
-  let connectedOnce = false;
-
-  // 永不退出的常驻守护主循环
-  while (true) {
-    try {
-      const port = await resolveCurrentPort();
-
-      if (!port) {
-        // Antigravity 当前没有活动窗口
-        if (activeClients.size > 0) {
-          log("Antigravity closed or restarted. Cleaning up active CDP sessions...");
-          for (const [id, session] of activeClients.entries()) {
-            try { session.client.close(); } catch (_) {}
-          }
-          activeClients.clear();
-        }
-        if (connectedOnce) {
-          log("Antigravity closed or lost its CDP endpoint. Exiting guardian daemon.");
-          break;
-        }
-        if (Date.now() - startedAt >= STARTUP_TIMEOUT_MS) {
-          log("Antigravity did not expose a CDP endpoint before the startup timeout. Exiting guardian daemon.");
-          break;
-        }
-        if (!isWaitingLogged) {
-          log("Waiting for Antigravity instance to be detected...");
-          isWaitingLogged = true;
-          lastReportedPort = null;
-        }
-        await sleep(2000);
-        continue;
-      }
-
-      isWaitingLogged = false;
-      connectedOnce = true;
-
-      // 如果端口发生变更（比如重启后生成了新端口）
-      if (lastReportedPort !== port) {
-        log(`Connected to Antigravity on CDP port ${port}`);
-        lastReportedPort = port;
-        for (const [id, session] of activeClients.entries()) {
-          try { session.client.close(); } catch (_) {}
-        }
-        activeClients.clear();
-      }
-
-      // 获取当前所有可注入页面
-      const targets = await findAllPageTargets(port);
-      const currentTargetIds = new Set(targets.map((t) => t.id));
-
-      // 清理已关闭的 target
-      for (const [id, session] of activeClients.entries()) {
-        if (!currentTargetIds.has(id)) {
-          log(`Target closed: ${session.url}`);
-          try { session.client.close(); } catch (_) {}
-          activeClients.delete(id);
-        }
-      }
-
-      // 注入新出现的 target
-      for (const target of targets) {
-        const existing = activeClients.get(target.id);
-        // Antigravity 会复用同一个 CDP target 完成页面导航；URL 变化时，
-        // 原来的 document 已经销毁，需要重新挂载新文档脚本。
-        if (existing && existing.url !== target.url) {
-          log(`Target navigated: ${existing.url} -> ${target.url}`);
-          try { existing.client.close(); } catch (_) {}
-          activeClients.delete(target.id);
-        }
-        if (!activeClients.has(target.id)) {
-          try {
-            const client = await injectIntoTarget(target);
-            activeClients.set(target.id, { client, url: target.url });
-            log(`Simplified Chinese injector attached to: ${target.url}`);
-          } catch (err) {
-            log(`Failed to attach to target ${target.id}: ${err.message}`);
-          }
-        }
-      }
-    } catch (loopError) {
-      log(`Daemon loop notice: ${loopError.message}`);
+  for (const target of targets) {
+    const existing = activeClients.get(target.id);
+    if (existing && existing.url !== target.url) {
+      try { existing.client.close(); } catch (_) {}
+      activeClients.delete(target.id);
     }
 
-    await sleep(1500);
+    if (activeClients.has(target.id)) continue;
+
+    try {
+      const client = await injectIntoTarget(target);
+      activeClients.set(target.id, { client, url: target.url });
+      log(`Attached to Antigravity page: ${target.url}`);
+    } catch (error) {
+      log(`Failed to attach to target ${target.id}: ${error.message}`);
+    }
   }
 }
 
+async function main() {
+  if (!fs.existsSync(APP)) {
+    log(`Antigravity.exe was not found beside the plugin: ${APP}`);
+    return;
+  }
+
+  if (!ensureSingleInstance()) return;
+  log(`Listener started for ${APP}`);
+
+  const activeClients = new Map();
+  let observedPid = null;
+  let activePort = null;
+  let waitingForPortPid = null;
+  let waitingForAppLogged = false;
+
+  while (!shuttingDown) {
+    try {
+      const app = await findRunningApp();
+
+      if (!app) {
+        if (observedPid !== null) {
+          log(`Antigravity exited (PID ${observedPid}); closing injection sessions.`);
+          closeClients(activeClients);
+          observedPid = null;
+          activePort = null;
+          waitingForPortPid = null;
+        }
+        if (!waitingForAppLogged) {
+          log("Waiting for Antigravity.exe...");
+          waitingForAppLogged = true;
+        }
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+
+      waitingForAppLogged = false;
+
+      if (observedPid !== app.pid) {
+        closeClients(activeClients);
+        observedPid = app.pid;
+        activePort = null;
+        waitingForPortPid = null;
+        log(`Antigravity detected (PID ${app.pid}).`);
+      }
+
+      const resolved = await resolveCurrentPort();
+      if (!resolved) {
+        if (waitingForPortPid !== app.pid) {
+          log("Antigravity is running, but no CDP endpoint is available yet.");
+          waitingForPortPid = app.pid;
+        }
+        closeClients(activeClients);
+        activePort = null;
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+
+      if (activePort !== resolved.port) {
+        closeClients(activeClients);
+        activePort = resolved.port;
+        log(`Connected to Antigravity CDP port ${activePort}.`);
+      }
+
+      await syncTargets(resolved.targets, activeClients);
+    } catch (error) {
+      log(`Listener loop notice: ${error.message}`);
+    }
+
+    await sleep(POLL_INTERVAL_MS);
+  }
+
+  closeClients(activeClients);
+}
+
+function shutdown() {
+  shuttingDown = true;
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+process.on("uncaughtException", (error) => {
+  log(`Fatal listener error: ${error.stack || error.message}`);
+  shutdown();
+});
+process.on("unhandledRejection", (error) => {
+  log(`Unhandled listener error: ${error?.stack || error}`);
+});
+
 main().catch((error) => {
-  log(`Fatal daemon error: ${error.stack || error.message}`);
+  log(`Fatal listener error: ${error.stack || error.message}`);
   process.exitCode = 1;
 });

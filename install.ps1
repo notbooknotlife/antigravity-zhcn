@@ -1,40 +1,58 @@
 $ErrorActionPreference = "Stop"
+
 $pluginRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$appRoot = "C:\Users\zy\AppData\Local\Programs\antigravity"
-$exe = Join-Path $appRoot "Antigravity.exe"
+$appPath = Join-Path $pluginRoot "Antigravity.exe"
+$vbsPath = Join-Path $pluginRoot "start-silent.vbs"
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$runName = "Antigravity-ZhCN"
 $wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+$localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE "AppData\Local" }
+$runtimeRoot = Join-Path $localAppData "Antigravity-ZhCN"
+$backupPath = Join-Path $runtimeRoot "previous-run-value.txt"
 
-if (-not (Test-Path $exe)) {
-  throw "Antigravity.exe not found at $exe"
+if (-not (Test-Path -LiteralPath $appPath -PathType Leaf)) {
+  throw "Antigravity.exe must be in the same folder as install.ps1: $appPath"
+}
+if (-not (Test-Path -LiteralPath $vbsPath -PathType Leaf)) {
+  throw "start-silent.vbs is missing: $vbsPath"
 }
 
-$version = (Get-Item $exe).VersionInfo.ProductVersion
-$state = [ordered]@{
-  installedAt = (Get-Date).ToString("o")
-  appPath = $exe
-  appVersion = $version
-  pluginRoot = $pluginRoot
+$nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
+$nodePathCandidates = @()
+if ($nodeCommand) { $nodePathCandidates += $nodeCommand.Source }
+$nodePathCandidates += Join-Path $env:ProgramFiles "nodejs\node.exe"
+$nodePathCandidates += Join-Path $localAppData "Programs\nodejs\node.exe"
+$nodePathCandidates += Join-Path ${env:ProgramFiles(x86)} "nodejs\node.exe"
+$nodeCandidates = $nodePathCandidates |
+  Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+  Select-Object -First 1
+
+if (-not $nodeCandidates) {
+  throw "Node.js was not found. Install Node.js and run install.ps1 again."
 }
-$state | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $pluginRoot "install-state.json")
 
-$desktop = [Environment]::GetFolderPath("Desktop")
-$shortcutPath = Join-Path $desktop "Antigravity-ZhCN.lnk"
-$shell = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = $wscript
-$shortcut.Arguments = "`"" + (Join-Path $pluginRoot "start-silent.vbs") + "`""
-$shortcut.WorkingDirectory = $pluginRoot
-$shortcut.IconLocation = "$exe,0"
-$shortcut.Description = "Antigravity 简体中文版 (后台静默注入守护)"
-$shortcut.Save()
+New-Item -ItemType Directory -Path $runtimeRoot -Force | Out-Null
+New-Item -Path $runKey -Force | Out-Null
 
-# 从桌面快捷方式启动 Antigravity 与汉化守护进程；不写入开机启动项。
-Start-Process -FilePath $wscript -ArgumentList "`"$pluginRoot\start-silent.vbs`"" -WorkingDirectory $pluginRoot
+$runCommand = "`"$wscript`" //B //Nologo `"$vbsPath`""
+$currentValue = (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue).$runName
+if ($currentValue -and $currentValue -ne $runCommand -and -not (Test-Path -LiteralPath $backupPath)) {
+  Set-Content -LiteralPath $backupPath -Value $currentValue -Encoding UTF8
+}
+Set-ItemProperty -Path $runKey -Name $runName -Value $runCommand -Type String
 
-Write-Host "================================================="
-Write-Host "已成功安装并启动 Antigravity 简体中文插件！"
-Write-Host "桌面快捷方式: $shortcutPath (无黑框启动)"
-Write-Host "开机自启: 未设置（汉化进程随 Antigravity 启动和退出）"
-Write-Host "守护进程已在后台运行，并绑定当前 Antigravity 生命周期。"
-Write-Host "特性: 多窗口自动注入、动态断线重连、设置左边汉化右边原文。"
-Write-Host "================================================="
+# Remove shortcuts created by older revisions. This version intentionally creates none.
+$desktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "Antigravity-ZhCN.lnk"
+$legacyStartupShortcut = Join-Path ([Environment]::GetFolderPath("Startup")) "Antigravity-ZhCN-Daemon.lnk"
+foreach ($legacyPath in @($desktopShortcut, $legacyStartupShortcut)) {
+  if (Test-Path -LiteralPath $legacyPath) {
+    Remove-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
+Start-Process -FilePath $wscript -ArgumentList "//B", "//Nologo", "`"$vbsPath`"" -WorkingDirectory $pluginRoot -WindowStyle Hidden
+
+Write-Host "Antigravity 简体中文插件已安装。"
+Write-Host "监听启动项: HKCU\Software\Microsoft\Windows\CurrentVersion\Run\$runName"
+Write-Host "监听目标: $appPath"
+Write-Host "不会创建桌面快捷方式，也不会修改官方 Antigravity.exe。"

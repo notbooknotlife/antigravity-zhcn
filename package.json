@@ -1,7 +1,0 @@
-{
-  "name": "antigravity-zhcn",
-  "version": "0.1.0",
-  "private": true,
-  "description": "External Simplified Chinese localization injector for Antigravity on Windows",
-  "main": "launcher.js"
-}

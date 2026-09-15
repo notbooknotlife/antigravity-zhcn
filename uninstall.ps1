@@ -1,26 +1,86 @@
 $ErrorActionPreference = "Stop"
-$pluginRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# 停止可能正在运行的守护进程
-$pidFile = Join-Path $pluginRoot "antigravity-zhcn.pid"
-if (Test-Path $pidFile) {
+$pluginRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$runName = "Antigravity-ZhCN"
+$wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
+$vbsPath = Join-Path $pluginRoot "start-silent.vbs"
+$localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE "AppData\Local" }
+$runtimeRoot = Join-Path $localAppData "Antigravity-ZhCN"
+$pidPath = Join-Path $runtimeRoot "antigravity-zhcn.pid"
+$backupPath = Join-Path $runtimeRoot "previous-run-value.txt"
+
+if (Test-Path -LiteralPath $pidPath) {
   try {
-    $daemonPid = [int](Get-Content $pidFile).Trim()
-    Stop-Process -Id $daemonPid -Force -ErrorAction SilentlyContinue
+    $listenerPid = [int](Get-Content -LiteralPath $pidPath -Raw).Trim()
+    if ($listenerPid -gt 0) {
+      Stop-Process -Id $listenerPid -Force -ErrorAction SilentlyContinue
+    }
   } catch {}
-  Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
 }
 
-$desktop = [Environment]::GetFolderPath("Desktop")
-$shortcutPath = Join-Path $desktop "Antigravity-ZhCN.lnk"
-if (Test-Path $shortcutPath) { Remove-Item -LiteralPath $shortcutPath -Force }
+$currentValue = (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue).$runName
+$ourCommand = "`"$wscript`" //B //Nologo `"$vbsPath`""
+if ($currentValue -eq $ourCommand) {
+  if (Test-Path -LiteralPath $backupPath) {
+    $previousValue = Get-Content -LiteralPath $backupPath -Raw
+    if ($previousValue.Trim()) {
+      Set-ItemProperty -Path $runKey -Name $runName -Value $previousValue.Trim() -Type String
+    } else {
+      Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+    }
+  } else {
+    Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
+  }
+} elseif ($currentValue) {
+  Write-Warning "The startup value was changed after installation; it was left untouched."
+}
 
-# 清理旧版本可能创建过的开机启动项；新版本不会再创建它。
-$startupDir = [Environment]::GetFolderPath("Startup")
-$legacyStartupShortcutPath = Join-Path $startupDir "Antigravity-ZhCN-Daemon.lnk"
-if (Test-Path $legacyStartupShortcutPath) { Remove-Item -LiteralPath $legacyStartupShortcutPath -Force }
+$legacyPaths = @(
+  (Join-Path ([Environment]::GetFolderPath("Desktop")) "Antigravity-ZhCN.lnk"),
+  (Join-Path ([Environment]::GetFolderPath("Startup")) "Antigravity-ZhCN-Daemon.lnk")
+)
+foreach ($legacyPath in $legacyPaths) {
+  if (Test-Path -LiteralPath $legacyPath) {
+    Remove-Item -LiteralPath $legacyPath -Force -ErrorAction SilentlyContinue
+  }
+}
 
-$statePath = Join-Path $pluginRoot "install-state.json"
-if (Test-Path $statePath) { Remove-Item -LiteralPath $statePath -Force }
+# The cleanup process starts after this script exits, so it can remove uninstall.ps1 too.
+$filesToRemove = @(
+  "launcher.js",
+  "cdp-client.js",
+  "translate.js",
+  "install.ps1",
+  "uninstall.ps1",
+  "start-silent.vbs",
+  "README.md",
+  "start-antigravity-zhcn.cmd",
+  "package.json",
+  "install-state.json",
+  "antigravity-zhcn.log",
+  "antigravity-zhcn.log.old",
+  "antigravity-zhcn.pid"
+) | ForEach-Object { Join-Path $pluginRoot $_ }
 
-Write-Host "已停止汉化守护进程并移除快捷方式。官方 Antigravity 未被修改。"
+$pathArray = ($filesToRemove | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ","
+$runtimeLiteral = "'" + $runtimeRoot.Replace("'", "''") + "'"
+$cleanupScript = @"
+Start-Sleep -Seconds 2
+foreach (`$target in @($pathArray)) {
+  Remove-Item -LiteralPath `$target -Force -ErrorAction SilentlyContinue
+}
+Remove-Item -LiteralPath $runtimeLiteral -Recurse -Force -ErrorAction SilentlyContinue
+"@
+$encodedCleanup = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cleanupScript))
+Start-Process -FilePath "powershell.exe" -ArgumentList @(
+  "-NoProfile",
+  "-NonInteractive",
+  "-WindowStyle",
+  "Hidden",
+  "-EncodedCommand",
+  $encodedCleanup
+) -WorkingDirectory $pluginRoot -WindowStyle Hidden
+
+Write-Host "Antigravity 简体中文插件已卸载。"
+Write-Host "已移除启动监听并安排清理插件文件；官方 Antigravity.exe 未被删除。"
