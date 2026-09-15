@@ -1,14 +1,18 @@
 $ErrorActionPreference = "Stop"
 
 $pluginRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-$runName = "Antigravity-ZhCN"
-$wscript = Join-Path $env:SystemRoot "System32\wscript.exe"
-$vbsPath = Join-Path $pluginRoot "start-silent.vbs"
+$taskName = "Antigravity-ZhCN-Listener"
+$startupScriptPath = Join-Path ([Environment]::GetFolderPath("Startup")) "Antigravity-ZhCN.vbs"
 $localAppData = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE "AppData\Local" }
 $runtimeRoot = Join-Path $localAppData "Antigravity-ZhCN"
 $pidPath = Join-Path $runtimeRoot "antigravity-zhcn.pid"
-$backupPath = Join-Path $runtimeRoot "previous-run-value.txt"
+
+try {
+  $service = New-Object -ComObject "Schedule.Service"
+  $service.Connect()
+  $folder = $service.GetFolder("\")
+  $folder.DeleteTask($taskName, 0)
+} catch {}
 
 if (Test-Path -LiteralPath $pidPath) {
   try {
@@ -19,21 +23,8 @@ if (Test-Path -LiteralPath $pidPath) {
   } catch {}
 }
 
-$currentValue = (Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue).$runName
-$ourCommand = "`"$wscript`" //B //Nologo `"$vbsPath`""
-if ($currentValue -eq $ourCommand) {
-  if (Test-Path -LiteralPath $backupPath) {
-    $previousValue = Get-Content -LiteralPath $backupPath -Raw
-    if ($previousValue.Trim()) {
-      Set-ItemProperty -Path $runKey -Name $runName -Value $previousValue.Trim() -Type String
-    } else {
-      Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
-    }
-  } else {
-    Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue
-  }
-} elseif ($currentValue) {
-  Write-Warning "The startup value was changed after installation; it was left untouched."
+if (Test-Path -LiteralPath $startupScriptPath) {
+  Remove-Item -LiteralPath $startupScriptPath -Force -ErrorAction SilentlyContinue
 }
 
 $legacyPaths = @(

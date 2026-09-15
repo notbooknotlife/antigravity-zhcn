@@ -1,15 +1,15 @@
 # Antigravity 简体中文插件 (v0.4.0)
 
-适用于 Windows 环境下、与 `Antigravity.exe` 放在同一目录的便携式汉化插件。
+适用于 Windows 环境下、放在 `Antigravity.exe` 所在安装目录内的便携式汉化插件。
 
 ## 工作方式
 
 > **安装前务必安装 Node.js。** Node.js 为插件监听器提供运行环境；如果未安装或无法运行，`install.ps1` 会弹窗提示并终止安装。
 
-安装后，插件通过当前用户的启动项监听原始 `Antigravity.exe`：
+安装后，插件通过 Windows 任务计划程序的当前用户登录任务监听原始 `Antigravity.exe`：
 
 - 不替换或修改官方 `Antigravity.exe`。
-- 不创建桌面快捷方式。
+- 不创建桌面快捷方式或启动文件夹快捷方式。
 - 不设置系统级服务，不需要管理员权限。
 - Antigravity 启动后建立 CDP 连接并注入汉化。
 - Antigravity 关闭后释放页面连接。
@@ -36,20 +36,35 @@ README.md         使用说明
 
 ## 安装
 
-将七个文件放到 `Antigravity.exe` 所在目录的第一层，然后在 PowerShell 中运行：
+将七个文件放到 `Antigravity.exe` 所在目录内，推荐使用独立子目录：
+
+```text
+antigravity\
+├─ Antigravity.exe
+└─ antigravity-zhcn\
+   ├─ install.ps1
+   ├─ uninstall.ps1
+   ├─ launcher.js
+   ├─ cdp-client.js
+   ├─ translate.js
+   ├─ start-silent.vbs
+   └─ README.md
+```
+
+然后在 PowerShell 中进入 `antigravity-zhcn` 目录并运行：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\install.ps1
 ```
 
-电脑需要已安装 Node.js。安装脚本只写入当前用户的：
+电脑需要已安装 Node.js。安装脚本只创建当前用户的登录任务：
 
 ```text
-HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Antigravity-ZhCN
+Antigravity-ZhCN-Listener
 ```
 
-安装完成后，用户仍然直接启动原始 `Antigravity.exe` 即可。插件不会自动启动或重启官方程序。
+该任务只在当前用户登录时启动监听器，不需要管理员权限。安装完成后，用户仍然直接启动原始 `Antigravity.exe` 即可。插件不会自动启动或重启官方程序。
 
 ## 卸载
 
@@ -60,7 +75,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\uninstall.ps1
 ```
 
-卸载会停止监听器、移除当前用户启动项、还原安装前已有的同名启动设置，并删除本插件的脚本文件。官方 `Antigravity.exe` 不会被删除。
+卸载会停止监听器、删除登录启动任务，并删除本插件的脚本文件。官方 `Antigravity.exe` 不会被删除。
 
 日志和 PID 位于 `%LOCALAPPDATA%\Antigravity-ZhCN`，不写入软件目录。
 

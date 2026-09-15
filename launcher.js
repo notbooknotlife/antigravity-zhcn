@@ -6,9 +6,14 @@ const { execFile } = require("child_process");
 const { CdpClient, findAllPageTargets } = require("./cdp-client");
 const { buildTranslationScript } = require("./translate");
 
-// The package is installed beside Antigravity.exe.
+// The package may be in Antigravity's install root or in a child folder such as antigravity-zhcn.
 const ROOT = __dirname;
-const APP = path.resolve(process.env.ANTIGRAVITY_EXE || path.join(ROOT, "Antigravity.exe"));
+const APP_CANDIDATES = [
+  process.env.ANTIGRAVITY_EXE,
+  path.join(ROOT, "Antigravity.exe"),
+  path.join(ROOT, "..", "Antigravity.exe"),
+].filter(Boolean).map((candidate) => path.resolve(candidate));
+const APP = APP_CANDIDATES.find((candidate) => fs.existsSync(candidate)) || APP_CANDIDATES[0];
 const APP_NAME = path.basename(APP);
 const DEFAULT_PORT = Number(process.env.ANTIGRAVITY_ZHCN_PORT || 9229);
 const POLL_INTERVAL_MS = Number(process.env.ANTIGRAVITY_ZHCN_POLL_INTERVAL || 1500);
